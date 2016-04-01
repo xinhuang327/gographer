@@ -82,10 +82,11 @@ func (typ *TypeInfo) IDField(name string, idFetcher relay.GlobalIDFetcherFn) *Ty
 	return typ
 }
 
-func (typ *TypeInfo) ResolvedField(name string, methodName string) *TypeInfo {
+func (typ *TypeInfo) ResolvedField(name string, methodName string, argNames ...string) *TypeInfo {
 	typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
 		Name: name,
 		MethodName: methodName,
+		ArgNames: argNames,
 	})
 	return typ
 }
@@ -98,6 +99,7 @@ func (typ *TypeInfo) AddField(name string, field *graphql.Field) *TypeInfo {
 type ResolvedFieldInfo struct {
 	Name       string
 	MethodName string
+	ArgNames   []string
 }
 
 func ToQLType(typ reflect.Type) graphql.Output {

@@ -11,7 +11,7 @@ import (
 func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 
 	qlTypes := make(map[string]*graphql.Object)
-	//qlConns := make(map[string]*relay.GraphQLConnectionDefinitions)
+	qlConns := make(map[string]*relay.GraphQLConnectionDefinitions)
 	var rootType *graphql.Object
 
 	var nodeDefinitions *relay.NodeDefinitions
@@ -62,35 +62,75 @@ func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 				// get QL type for return type
 				funcType := method.Func.Type()
 				returnType := funcType.Out(0) // ignore returned error
-				isList := returnType.Kind() == reflect.Array
+				isList := returnType.Kind() == reflect.Slice
 				isPtr := returnType.Kind() == reflect.Ptr
-				if isList {
-
-				} else if isPtr {
-					returnType = returnType.Elem()
-				}
-				var returnQLType graphql.Output
-				if returnQLType = ToQLType(returnType); returnQLType == nil {
-					if qlType, ok := qlTypes[returnType.Name()]; ok {
-						returnQLType = qlType
+				elemType := returnType
+				if isList || isPtr {
+					elemType = returnType.Elem()
+					// in case of slice of struct pointers
+					if elemType.Kind() == reflect.Ptr {
+						elemType = elemType.Elem()
 					}
 				}
-				if returnQLType != nil {
-					fmt.Println("returnQLType", returnQLType)
+				elemTypeName := elemType.Name()
+				var elemQLType graphql.Output
+				isPrimitive := true
+				if elemQLType = ToQLType(elemType); elemQLType == nil {
+					isPrimitive = false
+					if qlType, ok := qlTypes[elemTypeName]; ok {
+						elemQLType = qlType
+					}
+				}
+				if elemQLType != nil {
+					var fieldArgs graphql.FieldConfigArgument
+					var returnQLType graphql.Output
+					if !isList {
+						returnQLType = elemQLType
+					} else {
+						if isPrimitive {
+							// primitive list
+							returnQLType = graphql.NewList(elemQLType)
+						} else {
+							// find or create connection type
+							var conn *relay.GraphQLConnectionDefinitions
+							var found bool
+							if conn, found = qlConns[elemTypeName]; !found {
+								conn = relay.ConnectionDefinitions(relay.ConnectionConfig{
+									Name:     elemTypeName,
+									NodeType: elemQLType.(*graphql.Object),
+								})
+								qlConns[elemTypeName] = conn
+							}
+							returnQLType = conn.ConnectionType
+							funcArgs := make(graphql.FieldConfigArgument)
+							for i := 1; i < funcType.NumIn(); i++ {
+								argQLType := ToQLType(funcType.In(i))
+								funcArgs[rf.ArgNames[i - 1]] = &graphql.ArgumentConfig{
+									Type:         argQLType,
+									DefaultValue: nil,
+								}
+							}
+							fieldArgs = relay.NewConnectionArgs(funcArgs)
+						}
+					}
 					fields[rf.Name] = &graphql.Field{
 						Type: returnQLType,
+						Args: fieldArgs,
 						Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 							return dynamicCallResolver(funcType, p)
 						},
 					}
 				} else {
-					Warning("Cannot find QL Type for", returnType.Name(), rf.MethodName)
+					Warning("Cannot find QL Type for return type: ", returnType.Name(), "method:", rf.MethodName)
 				}
 			} else {
 				Warning("Cannot find method", rf.MethodName, "for type", refType.Name())
 			}
 		}
 		qlTypeConf.Fields = fields
+		if !typ.isRootType {
+			qlTypeConf.Interfaces = []*graphql.Interface{nodeDefinitions.NodeInterface}
+		}
 		qlType := graphql.NewObject(qlTypeConf)
 		qlTypes[qlTypeConf.Name] = qlType
 		if typ.isRootType {

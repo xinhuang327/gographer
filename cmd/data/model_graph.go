@@ -36,7 +36,7 @@ func GetModelSchemaInfo() *gographer.SchemaInfo {
 		return GetUser(id)
 	}).
 	IDField("id", nil).
-	ResolvedField("todos", "GetTodos").
+	ResolvedField("todos", "GetTodos", "status").
 	ResolvedField("totalCount", "GetTotalCount").
 	ResolvedField("completedCount", "GetCompletedCount")
 
