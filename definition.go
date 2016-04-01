@@ -8,8 +8,9 @@ import (
 )
 
 type SchemaInfo struct {
-	types       []*TypeInfo
-	typesByName map[string]*TypeInfo
+	types        []*TypeInfo
+	typesByName  map[string]*TypeInfo
+	rootInstance interface{}
 }
 
 func NewSchemaInfo() *SchemaInfo {
@@ -32,16 +33,21 @@ type TypeInfo struct {
 	fields         graphql.Fields
 	resolvedFields []ResolvedFieldInfo
 	isRootType     bool
+	instance       interface{}
 }
 
 type IDResolver func(id string) interface{}
 
 func NewTypeInfo(instance interface{}) *TypeInfo {
 	type_ := reflect.TypeOf(instance)
+	if type_.Kind() == reflect.Ptr {
+		type_ = type_.Elem()
+	}
 	typeDef := TypeInfo{
 		Type: type_,
 		Name: type_.Name(),
 		fields: make(graphql.Fields),
+		instance: instance,
 	}
 	return &typeDef
 }
@@ -82,11 +88,18 @@ func (typ *TypeInfo) IDField(name string, idFetcher relay.GlobalIDFetcherFn) *Ty
 	return typ
 }
 
-func (typ *TypeInfo) ResolvedField(name string, methodName string, argNames ...string) *TypeInfo {
+func (typ *TypeInfo) ResolvedField(name string, methodName string, argNamesAndDefaults ...interface{}) *TypeInfo {
+	var argNames []string
+	var defaults []interface{}
+	for i := 0; i < len(argNamesAndDefaults); i += 2 {
+		argNames = append(argNames, argNamesAndDefaults[i].(string))
+		defaults = append(defaults, argNamesAndDefaults[i + 1])
+	}
 	typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
 		Name: name,
 		MethodName: methodName,
 		ArgNames: argNames,
+		ArgDefaults: defaults,
 	})
 	return typ
 }
@@ -97,9 +110,10 @@ func (typ *TypeInfo) AddField(name string, field *graphql.Field) *TypeInfo {
 }
 
 type ResolvedFieldInfo struct {
-	Name       string
-	MethodName string
-	ArgNames   []string
+	Name        string
+	MethodName  string
+	ArgNames    []string
+	ArgDefaults []interface{}
 }
 
 func ToQLType(typ reflect.Type) graphql.Output {

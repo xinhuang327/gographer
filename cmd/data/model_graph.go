@@ -2,6 +2,12 @@ package data
 
 import "github.com/xinhuang327/gographer"
 
+func init() {
+	AddTodo("Hello Todo", false)
+	AddTodo("Eat dinner", true)
+	AddTodo("Sleep tight", false)
+}
+
 type Root struct{}
 
 func (r *Root) GetViewer() *User {
@@ -36,11 +42,11 @@ func GetModelSchemaInfo() *gographer.SchemaInfo {
 		return GetUser(id)
 	}).
 	IDField("id", nil).
-	ResolvedField("todos", "GetTodos", "status").
+	ResolvedField("todos", "GetTodos", "status", "any").
 	ResolvedField("totalCount", "GetTotalCount").
 	ResolvedField("completedCount", "GetCompletedCount")
 
-	sch.RegType(Root{}).SetRoot().
+	sch.RegType(&Root{}).SetRoot().
 	ResolvedField("viewer", "GetViewer")
 
 	return sch

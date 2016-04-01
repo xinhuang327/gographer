@@ -6,6 +6,7 @@ import (
 	"golang.org/x/net/context"
 	"reflect"
 	"fmt"
+	"errors"
 )
 
 func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
@@ -84,6 +85,7 @@ func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 				if elemQLType != nil {
 					var fieldArgs graphql.FieldConfigArgument
 					var returnQLType graphql.Output
+					resultIsConnection := false
 					if !isList {
 						returnQLType = elemQLType
 					} else {
@@ -92,6 +94,7 @@ func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 							returnQLType = graphql.NewList(elemQLType)
 						} else {
 							// find or create connection type
+							resultIsConnection = true
 							var conn *relay.GraphQLConnectionDefinitions
 							var found bool
 							if conn, found = qlConns[elemTypeName]; !found {
@@ -113,11 +116,14 @@ func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 							fieldArgs = relay.NewConnectionArgs(funcArgs)
 						}
 					}
+					typCaptured := typ
+					rfCaptured := rf
 					fields[rf.Name] = &graphql.Field{
 						Type: returnQLType,
 						Args: fieldArgs,
 						Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-							return dynamicCallResolver(funcType, p)
+							// call the function!
+							return sch.dynamicCallResolver(rfCaptured, funcType, typCaptured, resultIsConnection, p)
 						},
 					}
 				} else {
@@ -135,6 +141,7 @@ func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 		qlTypes[qlTypeConf.Name] = qlType
 		if typ.isRootType {
 			rootType = qlType
+			sch.rootInstance = typ.instance
 		}
 	}
 
@@ -145,7 +152,58 @@ func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 	return schema, err
 }
 
-func dynamicCallResolver(funcType reflect.Type, p graphql.ResolveParams) (interface{}, error) {
-	fmt.Println("[dynamicCallResolver]", funcType, p)
-	return nil, nil
+func (sch *SchemaInfo) dynamicCallResolver(rf ResolvedFieldInfo, funcType reflect.Type, typ *TypeInfo, resultIsConnection bool, p graphql.ResolveParams) (interface{}, error) {
+	fmt.Println("resultIsConnection", resultIsConnection)
+	fmt.Println("[dynamicCallResolver]", "funcType=", funcType, "rf=", rf, "typ=", typ, "p=", p)
+
+	var objVal reflect.Value
+	if typ.isRootType {
+		objVal = reflect.ValueOf(sch.rootInstance)
+	} else {
+		objVal = reflect.ValueOf(p.Source)
+	}
+	if !objVal.IsValid() {
+		return nil, errors.New("Cannot get source object when calling " + rf.MethodName)
+	}
+
+	methodVal := objVal.MethodByName(rf.MethodName)
+	if !methodVal.IsValid() {
+		return nil, errors.New(fmt.Sprint("Cannot get method ", rf.MethodName, " for object ", objVal.Type()))
+	}
+
+	var inValues []reflect.Value
+	for i, argName := range rf.ArgNames {
+		var argObj interface{}
+		var hasInput bool
+		if argObj, hasInput = p.Args[argName]; !hasInput {
+			argObj = rf.ArgDefaults[i]
+		}
+		inValues = append(inValues, reflect.ValueOf(argObj))
+	}
+
+	outValues := methodVal.Call(inValues)
+
+	out := outValues[0].Interface()
+
+	fmt.Println(funcType, rf.MethodName, "Out:", out)
+
+	if resultIsConnection {
+		resultSlice := toEmptyInterfaceSlice(out)
+		return relay.ConnectionFromArray(resultSlice, relay.NewConnectionArguments(p.Args)), nil
+	} else {
+		return out, nil
+	}
+}
+
+func toEmptyInterfaceSlice(slice interface{}) []interface{} {
+	s := reflect.ValueOf(slice)
+	if s.Kind() != reflect.Slice {
+		panic("InterfaceSlice() given a non-slice type")
+	}
+
+	ret := make([]interface{}, s.Len())
+	for i := 0; i < s.Len(); i++ {
+		ret[i] = s.Index(i).Interface()
+	}
+	return ret
 }
