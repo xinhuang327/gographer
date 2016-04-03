@@ -11,6 +11,7 @@ type SchemaInfo struct {
 	types        []*TypeInfo
 	typesByName  map[string]*TypeInfo
 	rootInstance interface{}
+	mutationInstance interface{}
 }
 
 func NewSchemaInfo() *SchemaInfo {
@@ -32,7 +33,9 @@ type TypeInfo struct {
 	idResolver     IDResolver
 	fields         graphql.Fields
 	resolvedFields []ResolvedFieldInfo
+	mutationFields []MutationFieldInfo
 	isRootType     bool
+	isMutationType bool
 	instance       interface{}
 }
 
@@ -88,20 +91,19 @@ func (typ *TypeInfo) IDField(name string, idFetcher relay.GlobalIDFetcherFn) *Ty
 	return typ
 }
 
-func (typ *TypeInfo) ResolvedField(name string, methodName string, argNamesAndDefaults ...interface{}) *TypeInfo {
-	var argNames []string
-	var defaults []interface{}
-	for i := 0; i < len(argNamesAndDefaults); i += 2 {
-		argNames = append(argNames, argNamesAndDefaults[i].(string))
-		defaults = append(defaults, argNamesAndDefaults[i + 1])
-	}
+func (typ *TypeInfo) ResolvedField(name string, methodName string, args ...ArgInfo) *TypeInfo {
 	typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
 		Name: name,
 		MethodName: methodName,
-		ArgNames: argNames,
-		ArgDefaults: defaults,
+		Args: args,
 	})
 	return typ
+}
+
+type ArgInfo struct {
+	Name         string
+	DefaultValue interface{}
+	NonNull      bool
 }
 
 func (typ *TypeInfo) AddField(name string, field *graphql.Field) *TypeInfo {
@@ -110,10 +112,36 @@ func (typ *TypeInfo) AddField(name string, field *graphql.Field) *TypeInfo {
 }
 
 type ResolvedFieldInfo struct {
-	Name        string
-	MethodName  string
-	ArgNames    []string
-	ArgDefaults []interface{}
+	Name       string
+	MethodName string
+	Args       []ArgInfo
+}
+
+func (typ *TypeInfo) SetMutation() *TypeInfo {
+	typ.isMutationType = true
+	return typ
+}
+
+func (typ *TypeInfo) MutationField(name string, methodName string, args []ArgInfo, outputs []OutputInfo) *TypeInfo {
+	typ.mutationFields = append(typ.mutationFields, MutationFieldInfo{
+		Name: name,
+		MethodName: methodName,
+		Args: args,
+		Outputs: outputs,
+	})
+	return typ
+}
+
+type MutationFieldInfo struct {
+	Name       string
+	MethodName string
+	Args       []ArgInfo
+	Outputs    []OutputInfo
+}
+
+type OutputInfo struct {
+	Name          string
+	ElemInterface interface{}
 }
 
 func ToQLType(typ reflect.Type) graphql.Output {
