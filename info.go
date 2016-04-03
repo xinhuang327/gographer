@@ -8,10 +8,25 @@ import (
 	"strconv"
 )
 
+const (
+	TAG_DefaultValue = "def"
+	TAG_NonNull = "nonNull"
+)
+
+const (
+	QLTypeKind_Simple = "QLTYPE_Simple"
+	QLTypeKind_SimpleList = "QLTYPE_SimpleList"
+	QLTypeKind_Struct = "QLTypeKind_Struct"
+	QLTypeKind_Connection = "QLTYPE_Connection"
+	QLTypeKind_Edge = "QLTYPE_Edge"
+)
+
+type QLTypeKind string
+
 type SchemaInfo struct {
-	types        []*TypeInfo
-	typesByName  map[string]*TypeInfo
-	rootInstance interface{}
+	types            []*TypeInfo
+	typesByName      map[string]*TypeInfo
+	rootInstance     interface{}
 	mutationInstance interface{}
 }
 
@@ -161,27 +176,39 @@ func (typ *TypeInfo) MutationField(name string, methodName string, args []ArgInf
 	if autoArgs {
 		args = nil
 	}
+	autoOutputs := IsAutoOutputs(outputs)
+	if autoOutputs {
+		outputs = nil
+	}
 	typ.mutationFields = append(typ.mutationFields, MutationFieldInfo{
 		Name: name,
 		MethodName: methodName,
 		Args: args,
-		AutoArgs: AutoArgs,
+		AutoArgs: autoArgs,
 		Outputs: outputs,
+		AutoOutputs: autoOutputs,
 	})
 	return typ
 }
 
 type MutationFieldInfo struct {
-	Name       string
-	MethodName string
-	Args       []ArgInfo
-	Outputs    []OutputInfo
-	AutoArgs   bool
+	Name        string
+	MethodName  string
+	Args        []ArgInfo
+	AutoArgs    bool
+	Outputs     []OutputInfo
+	AutoOutputs bool
 }
 
 type OutputInfo struct {
 	Name          string
 	ElemInterface interface{}
+}
+
+var AutoOutputs = []OutputInfo{OutputInfo{"__AutoOutputs__", nil}}
+
+func IsAutoOutputs(outputs []OutputInfo) bool {
+	return len(outputs) == 1 && outputs[0] == AutoOutputs[0]
 }
 
 func ToQLType(typ reflect.Type) graphql.Output {

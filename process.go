@@ -1,14 +1,15 @@
 package gographer
 
 import (
+	"errors"
+	"fmt"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/relay"
 	"golang.org/x/net/context"
 	"reflect"
-	"fmt"
-	"errors"
-	"unicode/utf8"
+	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
@@ -72,7 +73,7 @@ func (sch SchemaInfo) GetSchema() (graphql.Schema, error) {
 	return schema, err
 }
 
-func (sch *SchemaInfo) processMutationType(typ *TypeInfo, qlTypes map[string]*graphql.Object, qlConns map[string]*relay.GraphQLConnectionDefinitions, nodeDefinitions *relay.NodeDefinitions) (*graphql.Object) {
+func (sch *SchemaInfo) processMutationType(typ *TypeInfo, qlTypes map[string]*graphql.Object, qlConns map[string]*relay.GraphQLConnectionDefinitions, nodeDefinitions *relay.NodeDefinitions) *graphql.Object {
 	refType := typ.Type
 	refPtrType := reflect.PtrTo(refType)
 
@@ -94,30 +95,99 @@ func (sch *SchemaInfo) processMutationType(typ *TypeInfo, qlTypes map[string]*gr
 			mutConf.Name = mf.MethodName
 
 			var inputFields = make(graphql.InputObjectConfigFieldMap)
-			for i := 1; i < funcType.NumIn(); i++ {
-				argQLType := ToQLType(funcType.In(i)) // TODO: handle GraphQL ID type?
-				arg := mf.Args[i - 1]
-				if arg.NonNull {
-					argQLType = graphql.NewNonNull(argQLType)
+
+			if mf.AutoArgs {
+				// use struct args
+				if funcType.NumIn() == 2 {
+					argStructType := funcType.In(1)
+					if argStructType.Kind() == reflect.Struct {
+						for i := 0; i < argStructType.NumField(); i++ {
+
+							argField := argStructType.Field(i)
+							argFieldName := lowerFirst(argField.Name)
+							argQLType := ToQLType(argField.Type)
+
+							var defaultValue interface{} = nil
+							if defTag := argField.Tag.Get(TAG_DefaultValue); defTag != "" {
+								defaultValue = ParseString(defTag, argField.Type)
+							}
+							if nonNullTag := argField.Tag.Get(TAG_NonNull); nonNullTag == "true" {
+								argQLType = graphql.NewNonNull(argQLType)
+							}
+							inputFields[argFieldName] = &graphql.InputObjectFieldConfig{
+								Type:         argQLType,
+								DefaultValue: defaultValue,
+							}
+						}
+					} else {
+						Warning("AutoArgs needs a struct value as argument", mf.MethodName)
+					}
 				}
-				inputFields[arg.Name] = &graphql.InputObjectFieldConfig{
-					Type:         argQLType,
-					DefaultValue: arg.DefaultValue,
+
+			} else {
+				for i := 1; i < funcType.NumIn(); i++ {
+					argQLType := ToQLType(funcType.In(i)) // TODO: handle GraphQL ID type?
+					arg := mf.Args[i - 1]
+					if arg.NonNull {
+						argQLType = graphql.NewNonNull(argQLType)
+					}
+					inputFields[arg.Name] = &graphql.InputObjectFieldConfig{
+						Type:         argQLType,
+						DefaultValue: arg.DefaultValue,
+					}
 				}
 			}
 			mutConf.InputFields = inputFields
 
 			mfCaptured := mf
 			mutConf.MutateAndGetPayload = func(inputMap map[string]interface{}, info graphql.ResolveInfo, ctx context.Context) (map[string]interface{}, error) {
-				return sch.dynamicCallMutateAndGetPayload(mfCaptured, typ, inputMap)
+				return sch.dynamicCallMutateAndGetPayload(mfCaptured, funcType, typ, inputFields, inputMap)
 			}
 
 			var outputFields = make(graphql.Fields)
 
-			for i := 0; i < funcType.NumOut(); i ++ {
+			var outTypes []reflect.Type
+			var outputInfos []OutputInfo
 
-				outInfo := mf.Outputs[i]
-				outType := funcType.Out(i)
+			if mf.AutoOutputs {
+
+				// use struct args
+				outStructType := funcType.Out(0)
+				if outStructType.Kind() == reflect.Struct {
+					for i := 0; i < outStructType.NumField(); i++ {
+
+						outField := outStructType.Field(i)
+						outFieldName := lowerFirst(outField.Name)
+						outQLType, qlTypeKind := getComplexQLType(outField.Type, qlTypes, qlConns)
+
+						outInfo := OutputInfo{
+							Name: outFieldName,
+						}
+						if outQLType == reflect.TypeOf(relay.EdgeType{}) {
+
+						}
+						if strings.HasSuffix(outField.Name, "Edge") {
+
+						}
+						outTypes = append(outTypes, outQLType)
+						outputInfos = append(outputInfos, outInfo)
+					}
+				} else {
+					Warning("AutoArgs needs a struct value as argument", rf.MethodName)
+				}
+
+			} else {
+				// use manually OutputInfo and function type's output information
+				for i := 0; i < funcType.NumOut(); i++ {
+					outTypes = append(outTypes, funcType.Out(i))
+					outputInfos = append(outputInfos, mf.Outputs[i])
+				}
+			}
+
+			for i := 0; i < len(outputInfos); i++ {
+
+				outInfo := outputInfos[i]
+				outType := outTypes[i]
 				isList := false
 
 				if outType.Kind() == reflect.Ptr {
@@ -183,24 +253,54 @@ func (sch *SchemaInfo) processMutationType(typ *TypeInfo, qlTypes map[string]*gr
 	}
 
 	mutationType := graphql.NewObject(graphql.ObjectConfig{
-		Name: "Mutation",
+		Name:   "Mutation",
 		Fields: mutationFields,
 	})
 	return mutationType
 }
 
-func (sch *SchemaInfo) dynamicCallMutateAndGetPayload(mf MutationFieldInfo, typ *TypeInfo, inputMap map[string]interface{}) (map[string]interface{}, error) {
+func (sch *SchemaInfo) dynamicCallMutateAndGetPayload(mf MutationFieldInfo, funcType reflect.Type, typ *TypeInfo, inputFields graphql.InputObjectConfigFieldMap, inputMap map[string]interface{}) (map[string]interface{}, error) {
+
+	fmt.Println("[dynamicCallMutateAndGetPayload]", "funcType=", funcType, "mf=", mf, "typ=", typ.Name)
+
 	mutVal := reflect.ValueOf(typ.instance)
 	methodVal := mutVal.MethodByName(mf.MethodName)
 
 	var inValues []reflect.Value
-	for _, arg := range mf.Args {
-		var argObj interface{}
-		var hasInput bool
-		if argObj, hasInput = inputMap[arg.Name]; !hasInput {
-			argObj = arg.DefaultValue
+
+	if mf.AutoArgs {
+		// use struct args
+		if funcType.NumIn() == 2 {
+			argStructType := funcType.In(1)
+			argStructVal := reflect.New(argStructType).Elem()
+
+			for i := 0; i < argStructVal.NumField(); i++ {
+				argStructField := argStructType.Field(i)
+				argStructFieldVal := argStructVal.Field(i)
+				lowerFirstFieldName := lowerFirst(argStructField.Name)
+
+				var argObj interface{} = nil
+				var hasInput bool
+				if argObj, hasInput = inputMap[lowerFirstFieldName]; !hasInput {
+					argObj = inputFields[lowerFirstFieldName].DefaultValue
+				}
+				if argObj != nil {
+					argStructFieldVal.Set(reflect.ValueOf(argObj)) // bind field value
+				}
+			}
+			inValues = append(inValues, argStructVal)
 		}
-		inValues = append(inValues, reflect.ValueOf(argObj))
+
+	} else {
+		// use plain args
+		for _, arg := range mf.Args {
+			var argObj interface{}
+			var hasInput bool
+			if argObj, hasInput = inputMap[arg.Name]; !hasInput {
+				argObj = arg.DefaultValue
+			}
+			inValues = append(inValues, reflect.ValueOf(argObj))
+		}
 	}
 
 	outValues := methodVal.Call(inValues) // call mutate function!
@@ -213,7 +313,7 @@ func (sch *SchemaInfo) dynamicCallMutateAndGetPayload(mf MutationFieldInfo, typ 
 	return outMap, nil
 }
 
-func (sch *SchemaInfo) processObjectType(typ *TypeInfo, qlTypes map[string]*graphql.Object, qlConns map[string]*relay.GraphQLConnectionDefinitions, nodeDefinitions *relay.NodeDefinitions) (*graphql.Object) {
+func (sch *SchemaInfo) processObjectType(typ *TypeInfo, qlTypes map[string]*graphql.Object, qlConns map[string]*relay.GraphQLConnectionDefinitions, nodeDefinitions *relay.NodeDefinitions) *graphql.Object {
 	qlTypeConf := graphql.ObjectConfig{}
 	qlTypeConf.Name = typ.Name
 
@@ -244,109 +344,69 @@ func (sch *SchemaInfo) processObjectType(typ *TypeInfo, qlTypes map[string]*grap
 
 		if foundMethod {
 			funcType := method.Func.Type()
+			returnType := funcType.Out(0) // only use first return value, TODO: handle error
+			var fieldArgs graphql.FieldConfigArgument
 
-			// get QL type for return type
-			returnType := funcType.Out(0) // ignore returned error, TODO: handle error
-			isList := returnType.Kind() == reflect.Slice
-			isPtr := returnType.Kind() == reflect.Ptr
-			elemType := returnType
-			if isList || isPtr {
-				elemType = returnType.Elem()
-				// in case of slice of struct pointers
-				if elemType.Kind() == reflect.Ptr {
-					elemType = elemType.Elem()
-				}
-			}
+			returnQLType, qlTypeKind := getComplexQLType(returnType, qlTypes, qlConns)
 
-			var elemQLType graphql.Output
+			resultIsConnection := qlTypeKind == QLTypeKind_Connection
 
-			elemTypeName := elemType.Name()
-			isPrimitive := true
-			if elemQLType = ToQLType(elemType); elemQLType == nil {
-				isPrimitive = false
-				if qlType, ok := qlTypes[elemTypeName]; ok {
-					elemQLType = qlType
-				}
-			}
+			funcArgs := make(graphql.FieldConfigArgument)
 
-			if elemQLType != nil {
-				var fieldArgs graphql.FieldConfigArgument
-				var returnQLType graphql.Output
-				resultIsConnection := false
+			if rf.AutoArgs {
+				// use struct args
+				argStructType := funcType.In(1)
+				if argStructType.Kind() == reflect.Struct {
+					for i := 0; i < argStructType.NumField(); i++ {
 
-				if !isList {
-					returnQLType = elemQLType
+						argField := argStructType.Field(i)
+						argFieldName := lowerFirst(argField.Name)
+						argQLType := ToQLType(argField.Type)
 
-				} else {
-					if isPrimitive {
-						// primitive list
-						returnQLType = graphql.NewList(elemQLType)
-
-					} else {
-						// is connection
-						resultIsConnection = true
-						conn := getOrCreateConnection(elemTypeName, elemQLType, qlConns)
-						returnQLType = conn.ConnectionType
-
-						// bind the args for connection
-						funcArgs := make(graphql.FieldConfigArgument)
-
-						if rf.AutoArgs {
-
-							// use struct args
-							argStructType := funcType.In(1)
-							if argStructType.Kind() == reflect.Struct {
-								for i := 0; i < argStructType.NumField(); i ++ {
-
-									argField := argStructType.Field(i)
-									argFieldName := lowerFirst(argField.Name)
-									argQLType := ToQLType(argField.Type)
-
-									var defaultValue interface{} = nil
-									if defTag := argField.Tag.Get("def"); defTag != "" {
-										defaultValue = ParseString(defTag, argField.Type)
-									}
-									funcArgs[argFieldName] = &graphql.ArgumentConfig{
-										Type:         argQLType,
-										DefaultValue: defaultValue,
-									}
-								}
-							} else {
-								Warning("AutoArgs needs a struct value as argument", rf.MethodName)
-							}
-						} else {
-
-							// use manual argument info
-							for i := 1; i < funcType.NumIn(); i++ {
-								argQLType := ToQLType(funcType.In(i))
-								arg := rf.Args[i - 1]
-								if arg.NonNull {
-									argQLType = graphql.NewNonNull(argQLType)
-								}
-								funcArgs[arg.Name] = &graphql.ArgumentConfig{
-									Type:         argQLType,
-									DefaultValue: arg.DefaultValue,
-								}
-							}
+						var defaultValue interface{} = nil
+						if defTag := argField.Tag.Get(TAG_DefaultValue); defTag != "" {
+							defaultValue = ParseString(defTag, argField.Type)
 						}
-						fieldArgs = relay.NewConnectionArgs(funcArgs)
+						if nonNullTag := argField.Tag.Get(TAG_NonNull); nonNullTag == "true" {
+							argQLType = graphql.NewNonNull(argQLType)
+						}
+						funcArgs[argFieldName] = &graphql.ArgumentConfig{
+							Type:         argQLType,
+							DefaultValue: defaultValue,
+						}
 					}
-				}
-				// capture infomation for later function call
-				typCaptured := typ
-				rfCaptured := rf
-
-				fields[rf.Name] = &graphql.Field{
-					Type: returnQLType,
-					Args: fieldArgs,
-					Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-						// call the function!
-						return sch.dynamicCallResolver(rfCaptured, funcType, typCaptured, fieldArgs, resultIsConnection, p)
-					},
+				} else {
+					Warning("AutoArgs needs a struct value as argument", rf.MethodName)
 				}
 
 			} else {
-				Warning("Cannot find QL Type for return type: ", returnType.Name(), "method:", rf.MethodName)
+				// use manual argument info
+				for i := 1; i < funcType.NumIn(); i++ {
+					argQLType := ToQLType(funcType.In(i))
+					arg := rf.Args[i - 1]
+					if arg.NonNull {
+						argQLType = graphql.NewNonNull(argQLType)
+					}
+					funcArgs[arg.Name] = &graphql.ArgumentConfig{
+						Type:         argQLType,
+						DefaultValue: arg.DefaultValue,
+					}
+				}
+			}
+
+			fieldArgs = relay.NewConnectionArgs(funcArgs)
+
+			// capture infomation for later function call
+			typCaptured := typ
+			rfCaptured := rf
+
+			fields[rf.Name] = &graphql.Field{
+				Type: returnQLType,
+				Args: fieldArgs,
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					// call the function!
+					return sch.dynamicCallResolver(rfCaptured, funcType, typCaptured, fieldArgs, resultIsConnection, p)
+				},
 			}
 		} else {
 			Warning("Cannot find method", rf.MethodName, "for type", refType.Name())
@@ -365,7 +425,7 @@ func (sch *SchemaInfo) processObjectType(typ *TypeInfo, qlTypes map[string]*grap
 
 func (sch *SchemaInfo) dynamicCallResolver(rf ResolvedFieldInfo, funcType reflect.Type, typ *TypeInfo, fieldArgs graphql.FieldConfigArgument, resultIsConnection bool, p graphql.ResolveParams) (interface{}, error) {
 	fmt.Println("resultIsConnection", resultIsConnection)
-	fmt.Println("[dynamicCallResolver]", "funcType=", funcType, "rf=", rf, "typ=", typ, "p=", p)
+	fmt.Println("[dynamicCallResolver]", "funcType=", funcType, "rf=", rf, "typ=", typ.Name)
 
 	var objVal reflect.Value
 	if typ.isRootType {
@@ -388,7 +448,7 @@ func (sch *SchemaInfo) dynamicCallResolver(rf ResolvedFieldInfo, funcType reflec
 		argStructType := funcType.In(1)
 		argStructVal := reflect.New(argStructType).Elem()
 
-		for i := 0; i < argStructVal.NumField(); i ++ {
+		for i := 0; i < argStructVal.NumField(); i++ {
 			argStructField := argStructType.Field(i)
 			argStructFieldVal := argStructVal.Field(i)
 			lowerFirstFieldName := lowerFirst(argStructField.Name)
@@ -431,6 +491,61 @@ func (sch *SchemaInfo) dynamicCallResolver(rf ResolvedFieldInfo, funcType reflec
 	}
 }
 
+func getComplexQLType(returnType reflect.Type, qlTypes map[string]*graphql.Object, qlConns map[string]*relay.GraphQLConnectionDefinitions) (graphql.Output, QLTypeKind) {
+
+	var returnQLType graphql.Output
+	var qlTypeKind QLTypeKind
+
+	isList := returnType.Kind() == reflect.Slice
+	isPtr := returnType.Kind() == reflect.Ptr
+	elemType := returnType
+	if isList || isPtr {
+		elemType = returnType.Elem()
+		// in case of slice of struct pointers
+		if elemType.Kind() == reflect.Ptr {
+			elemType = elemType.Elem()
+		}
+	}
+
+	var elemQLType graphql.Output
+
+	elemTypeName := elemType.Name()
+	isPrimitive := true
+	if elemQLType = ToQLType(elemType); elemQLType == nil {
+		isPrimitive = false
+		if qlType, ok := qlTypes[elemTypeName]; ok {
+			elemQLType = qlType
+		}
+	}
+
+	if elemQLType != nil {
+		if !isList {
+			returnQLType = elemQLType
+			if isPrimitive {
+				qlTypeKind = QLTypeKind_Simple
+			} else {
+				qlTypeKind = QLTypeKind_Struct
+			}
+		} else {
+			if isPrimitive {
+				// primitive list
+				returnQLType = graphql.NewList(elemQLType)
+				qlTypeKind = QLTypeKind_SimpleList
+			} else {
+				// is connection
+				conn := getOrCreateConnection(elemTypeName, elemQLType, qlConns)
+				returnQLType = conn.ConnectionType
+				qlTypeKind = QLTypeKind_Connection
+			}
+		}
+	} else {
+		// TODO: if it's EdgeType
+		Warning("Cannot resolve QL type for return type", returnType)
+	}
+
+	return returnQLType, qlTypeKind
+}
+
 func getOrCreateConnection(elemTypeName string, elemQLType graphql.Output, qlConns map[string]*relay.GraphQLConnectionDefinitions) *relay.GraphQLConnectionDefinitions {
 	var conn *relay.GraphQLConnectionDefinitions
 	var found bool
@@ -467,10 +582,10 @@ func lowerFirst(s string) string {
 	return string(unicode.ToLower(r)) + s[n:]
 }
 
-func upperFirst(s string) string {
-	if s == "" {
-		return ""
-	}
-	r, n := utf8.DecodeRuneInString(s)
-	return string(unicode.ToUpper(r)) + s[n:]
-}
+//func upperFirst(s string) string {
+//	if s == "" {
+//		return ""
+//	}
+//	r, n := utf8.DecodeRuneInString(s)
+//	return string(unicode.ToUpper(r)) + s[n:]
+//}

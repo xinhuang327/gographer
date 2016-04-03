@@ -9,28 +9,45 @@ type Root struct{}
 type Mutation struct{}
 
 type AddTodoInput struct {
-	Text string `nonnull:"true"`
+	Text string `nonNull:"true"`
 }
 
-func (m *Mutation) AddTodo(in AddTodoInput) (todoEdge relay.EdgeType, viewer *User) {
+type AddTodoOutput struct {
+	TodoEdge relay.EdgeType //`elemType:"Todo"`
+	Viewer   *User
+}
+
+func (m *Mutation) AddTodo(in AddTodoInput) *AddTodoOutput {
 	todoId := AddTodo(in.Text, false)
 	todo := GetTodo(todoId)
 	// TODO: manage pagination
-	return relay.EdgeType{
-		Node:   todo,
-		Cursor: relay.CursorForObjectInConnection(TodosToSliceInterface(GetTodos("any")), todo),
-	}, GetViewer()
+	return &AddTodoOutput{
+		TodoEdge: relay.EdgeType{
+			Node:   todo,
+			Cursor: relay.CursorForObjectInConnection(TodosToSliceInterface(GetTodos("any")), todo),
+		},
+		Viewer: GetViewer(),
+	}
 }
 
-func (m *Mutation) ChangeTodoStatus(id string, complete bool) (todo *Todo, viewer *User) {
-	resolvedId := relay.FromGlobalID(id) // TODO: ID conversion could be handled outside the function
+type ChangeTodoStatusInput struct {
+	Id       string `nonNull:"true"`
+	Complete bool `nonNull:"true"`
+}
+
+func (m *Mutation) ChangeTodoStatus(in ChangeTodoStatusInput) (todo *Todo, viewer *User) {
+	resolvedId := relay.FromGlobalID(in.Id) // TODO: ID conversion could be handled outside the function
 	todoID := resolvedId.ID
-	ChangeTodoStatus(todoID, complete)
+	ChangeTodoStatus(todoID, in.Complete)
 	return GetTodo(todoID), GetViewer()
 }
 
-func (m *Mutation) MarkAllTodos(complete bool) (changedTodos []*Todo, viewer *User) {
-	todoIds := MarkAllTodos(complete)
+type MarkAllTodosInput struct {
+	Complete bool `nonNull:"true"`
+}
+
+func (m *Mutation) MarkAllTodos(in MarkAllTodosInput) (changedTodos []*Todo, viewer *User) {
+	todoIds := MarkAllTodos(in.Complete)
 	todos := []*Todo{}
 	for _, todoId := range todoIds {
 		todo := GetTodo(todoId)
@@ -45,16 +62,25 @@ func (m *Mutation) RemoveCompletedTodos() (deletedTodoIds []string, viewer *User
 	return RemoveCompletedTodos(), GetViewer()
 }
 
-func (m *Mutation) RemoveTodo(id string) (deletedTodoId string, viewer *User) {
-	resolvedId := relay.FromGlobalID(id)
+type RemoveTodoInput struct {
+	Id string `nonNull:"true"`
+}
+
+func (m *Mutation) RemoveTodo(in RemoveTodoInput) (deletedTodoId string, viewer *User) {
+	resolvedId := relay.FromGlobalID(in.Id)
 	RemoveTodo(resolvedId.ID)
 	return relay.ToGlobalID(resolvedId.Type, resolvedId.ID), GetViewer()
 }
 
-func (m *Mutation) RenameTodo(id string, text string) (todo *Todo, viewer *User) {
-	resolvedId := relay.FromGlobalID(id)
+type RenameTodoInput struct {
+	Id   string `nonNull:"true"`
+	Text string `nonNull:"true"`
+}
+
+func (m *Mutation) RenameTodo(in RenameTodoInput) (todo *Todo, viewer *User) {
+	resolvedId := relay.FromGlobalID(in.Id)
 	todoID := resolvedId.ID
-	RenameTodo(todoID, text)
+	RenameTodo(todoID, in.Text)
 	return GetTodo(todoID), GetViewer()
 }
 
