@@ -5,6 +5,7 @@ import (
 	"github.com/graphql-go/graphql"
 	"fmt"
 	"github.com/graphql-go/relay"
+	"strconv"
 )
 
 type SchemaInfo struct {
@@ -91,11 +92,37 @@ func (typ *TypeInfo) IDField(name string, idFetcher relay.GlobalIDFetcherFn) *Ty
 	return typ
 }
 
-func (typ *TypeInfo) ResolvedField(name string, methodName string, args ...ArgInfo) *TypeInfo {
+// Auto adds simple fields
+func (typ *TypeInfo) SimpleFields() *TypeInfo {
+	for i := 0; i < typ.Type.NumField(); i++ {
+		field := typ.Type.Field(i)
+		var fieldName string
+		if jsonTag := field.Tag.Get("json"); jsonTag != "" {
+			fieldName = jsonTag
+		} else {
+			fieldName = field.Name
+		}
+		if _, exists := typ.fields[fieldName]; !exists {
+			if qlType := ToQLType(field.Type); qlType != nil {
+				typ.AddField(fieldName, &graphql.Field{
+					Type: qlType,
+				})
+			}
+		}
+	}
+	return typ
+}
+
+func (typ *TypeInfo) ResolvedField(name string, methodName string, args []ArgInfo) *TypeInfo {
+	autoArgs := IsAutoArgs(args)
+	if autoArgs {
+		args = nil
+	}
 	typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
 		Name: name,
 		MethodName: methodName,
 		Args: args,
+		AutoArgs: autoArgs,
 	})
 	return typ
 }
@@ -104,6 +131,12 @@ type ArgInfo struct {
 	Name         string
 	DefaultValue interface{}
 	NonNull      bool
+}
+
+var AutoArgs = []ArgInfo{ArgInfo{"__AutoArgs__", nil, false}}
+
+func IsAutoArgs(args []ArgInfo) bool {
+	return len(args) == 1 && args[0] == AutoArgs[0]
 }
 
 func (typ *TypeInfo) AddField(name string, field *graphql.Field) *TypeInfo {
@@ -115,6 +148,7 @@ type ResolvedFieldInfo struct {
 	Name       string
 	MethodName string
 	Args       []ArgInfo
+	AutoArgs   bool
 }
 
 func (typ *TypeInfo) SetMutation() *TypeInfo {
@@ -123,10 +157,15 @@ func (typ *TypeInfo) SetMutation() *TypeInfo {
 }
 
 func (typ *TypeInfo) MutationField(name string, methodName string, args []ArgInfo, outputs []OutputInfo) *TypeInfo {
+	autoArgs := IsAutoArgs(args)
+	if autoArgs {
+		args = nil
+	}
 	typ.mutationFields = append(typ.mutationFields, MutationFieldInfo{
 		Name: name,
 		MethodName: methodName,
 		Args: args,
+		AutoArgs: AutoArgs,
 		Outputs: outputs,
 	})
 	return typ
@@ -137,6 +176,7 @@ type MutationFieldInfo struct {
 	MethodName string
 	Args       []ArgInfo
 	Outputs    []OutputInfo
+	AutoArgs   bool
 }
 
 type OutputInfo struct {
@@ -167,6 +207,38 @@ func ToQLType(typ reflect.Type) graphql.Output {
 	default:
 		return nil
 	}
+}
+
+func ParseString(str string, typ reflect.Type) interface{} {
+	switch typ.Kind() {
+	case reflect.Float32:fallthrough
+	case reflect.Float64:
+		if v, err := strconv.ParseFloat(str, 32); err == nil {
+			return v
+		}
+	case reflect.String:
+		return str
+	case reflect.Bool:
+		if v, err := strconv.ParseBool(str); err == nil {
+			return v
+		}
+	case reflect.Int:fallthrough
+	case reflect.Int8:fallthrough
+	case reflect.Int16:fallthrough
+	case reflect.Int32:fallthrough
+	case reflect.Int64:fallthrough
+	case reflect.Uint:fallthrough
+	case reflect.Uint8:fallthrough
+	case reflect.Uint16:fallthrough
+	case reflect.Uint32:fallthrough
+	case reflect.Uint64:
+		if v, err := strconv.ParseInt(str, 0, 0); err == nil {
+			return v
+		}
+	default:
+		return nil
+	}
+	return nil
 }
 
 func Warning(a ...interface{}) {
