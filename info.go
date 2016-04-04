@@ -1,24 +1,25 @@
 package gographer
 
 import (
-	"reflect"
-	"github.com/graphql-go/graphql"
 	"fmt"
+	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/relay"
+	"reflect"
 	"strconv"
+	"strings"
 )
 
 const (
 	TAG_DefaultValue = "def"
-	TAG_NonNull = "nonNull"
+	TAG_NonNull      = "nonNull"
 )
 
 const (
-	QLTypeKind_Simple = "QLTYPE_Simple"
+	QLTypeKind_Simple     = "QLTYPE_Simple"
 	QLTypeKind_SimpleList = "QLTYPE_SimpleList"
-	QLTypeKind_Struct = "QLTypeKind_Struct"
+	QLTypeKind_Struct     = "QLTypeKind_Struct"
 	QLTypeKind_Connection = "QLTYPE_Connection"
-	QLTypeKind_Edge = "QLTYPE_Edge"
+	QLTypeKind_Edge       = "QLTYPE_Edge"
 )
 
 type QLTypeKind string
@@ -63,9 +64,9 @@ func NewTypeInfo(instance interface{}) *TypeInfo {
 		type_ = type_.Elem()
 	}
 	typeDef := TypeInfo{
-		Type: type_,
-		Name: type_.Name(),
-		fields: make(graphql.Fields),
+		Type:     type_,
+		Name:     type_.Name(),
+		fields:   make(graphql.Fields),
 		instance: instance,
 	}
 	return &typeDef
@@ -134,11 +135,25 @@ func (typ *TypeInfo) ResolvedField(name string, methodName string, args []ArgInf
 		args = nil
 	}
 	typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
-		Name: name,
+		Name:       name,
 		MethodName: methodName,
-		Args: args,
-		AutoArgs: autoArgs,
+		Args:       args,
+		AutoArgs:   autoArgs,
 	})
+	return typ
+}
+
+// Auto adds resolved fields
+func (typ *TypeInfo) ResolvedFields() *TypeInfo {
+	ptrType := reflect.PtrTo(typ.Type)
+	for i := 0; i < ptrType.NumMethod(); i++ {
+		method := ptrType.Method(i)
+		var methodName = method.Name
+		if strings.HasPrefix(methodName, "Get") {
+			fieldName := lowerFirst(strings.TrimPrefix(methodName, "Get"))
+			typ.ResolvedField(fieldName, methodName, AutoArgs)
+		}
+	}
 	return typ
 }
 
@@ -181,13 +196,25 @@ func (typ *TypeInfo) MutationField(name string, methodName string, args []ArgInf
 		outputs = nil
 	}
 	typ.mutationFields = append(typ.mutationFields, MutationFieldInfo{
-		Name: name,
-		MethodName: methodName,
-		Args: args,
-		AutoArgs: autoArgs,
-		Outputs: outputs,
+		Name:        name,
+		MethodName:  methodName,
+		Args:        args,
+		AutoArgs:    autoArgs,
+		Outputs:     outputs,
 		AutoOutputs: autoOutputs,
 	})
+	return typ
+}
+
+// Auto adds mutation fields
+func (typ *TypeInfo) MutationFields() *TypeInfo {
+	ptrType := reflect.PtrTo(typ.Type)
+	for i := 0; i < ptrType.NumMethod(); i++ {
+		method := ptrType.Method(i)
+		var methodName = method.Name
+		var qlMutationName = lowerFirst(methodName)
+		typ.MutationField(qlMutationName, methodName, AutoArgs, AutoOutputs)
+	}
 	return typ
 }
 
@@ -203,9 +230,20 @@ type MutationFieldInfo struct {
 type OutputInfo struct {
 	Name          string
 	ElemInterface interface{}
+	ElemTypeName  string
 }
 
-var AutoOutputs = []OutputInfo{OutputInfo{"__AutoOutputs__", nil}}
+func (outputInfo OutputInfo) GetElementTypeName() string {
+	if outputInfo.ElemTypeName != "" {
+		return outputInfo.ElemTypeName
+	} else if outputInfo.ElemInterface != nil {
+		return reflect.TypeOf(outputInfo.ElemInterface).Name()
+	} else {
+		return ""
+	}
+}
+
+var AutoOutputs = []OutputInfo{OutputInfo{Name: "__AutoOutputs__"}}
 
 func IsAutoOutputs(outputs []OutputInfo) bool {
 	return len(outputs) == 1 && outputs[0] == AutoOutputs[0]
@@ -213,22 +251,32 @@ func IsAutoOutputs(outputs []OutputInfo) bool {
 
 func ToQLType(typ reflect.Type) graphql.Output {
 	switch typ.Kind() {
-	case reflect.Float32:fallthrough
+	case reflect.Float32:
+		fallthrough
 	case reflect.Float64:
 		return graphql.Float
 	case reflect.String:
 		return graphql.String
 	case reflect.Bool:
 		return graphql.Boolean
-	case reflect.Int:fallthrough
-	case reflect.Int8:fallthrough
-	case reflect.Int16:fallthrough
-	case reflect.Int32:fallthrough
-	case reflect.Int64:fallthrough
-	case reflect.Uint:fallthrough
-	case reflect.Uint8:fallthrough
-	case reflect.Uint16:fallthrough
-	case reflect.Uint32:fallthrough
+	case reflect.Int:
+		fallthrough
+	case reflect.Int8:
+		fallthrough
+	case reflect.Int16:
+		fallthrough
+	case reflect.Int32:
+		fallthrough
+	case reflect.Int64:
+		fallthrough
+	case reflect.Uint:
+		fallthrough
+	case reflect.Uint8:
+		fallthrough
+	case reflect.Uint16:
+		fallthrough
+	case reflect.Uint32:
+		fallthrough
 	case reflect.Uint64:
 		return graphql.Int
 	default:
@@ -238,7 +286,8 @@ func ToQLType(typ reflect.Type) graphql.Output {
 
 func ParseString(str string, typ reflect.Type) interface{} {
 	switch typ.Kind() {
-	case reflect.Float32:fallthrough
+	case reflect.Float32:
+		fallthrough
 	case reflect.Float64:
 		if v, err := strconv.ParseFloat(str, 32); err == nil {
 			return v
@@ -249,15 +298,24 @@ func ParseString(str string, typ reflect.Type) interface{} {
 		if v, err := strconv.ParseBool(str); err == nil {
 			return v
 		}
-	case reflect.Int:fallthrough
-	case reflect.Int8:fallthrough
-	case reflect.Int16:fallthrough
-	case reflect.Int32:fallthrough
-	case reflect.Int64:fallthrough
-	case reflect.Uint:fallthrough
-	case reflect.Uint8:fallthrough
-	case reflect.Uint16:fallthrough
-	case reflect.Uint32:fallthrough
+	case reflect.Int:
+		fallthrough
+	case reflect.Int8:
+		fallthrough
+	case reflect.Int16:
+		fallthrough
+	case reflect.Int32:
+		fallthrough
+	case reflect.Int64:
+		fallthrough
+	case reflect.Uint:
+		fallthrough
+	case reflect.Uint8:
+		fallthrough
+	case reflect.Uint16:
+		fallthrough
+	case reflect.Uint32:
+		fallthrough
 	case reflect.Uint64:
 		if v, err := strconv.ParseInt(str, 0, 0); err == nil {
 			return v
@@ -272,4 +330,3 @@ func Warning(a ...interface{}) {
 	a = append([]interface{}{"[Gographer warning]"}, a...)
 	fmt.Println(a...)
 }
-

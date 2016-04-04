@@ -1,14 +1,14 @@
 package main
 
 import (
-	"github.com/xinhuang327/gographer/cmd/data"
+	"encoding/json"
 	"fmt"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/testutil"
-	"log"
+	"github.com/xinhuang327/gographer/cmd/data"
 	"io/ioutil"
+	"log"
 	"os"
-	"encoding/json"
 )
 
 func main() {
