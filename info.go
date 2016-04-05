@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"runtime"
+	"runtime/debug"
 )
 
 const (
@@ -54,6 +56,7 @@ type TypeInfo struct {
 	isRootType     bool
 	isMutationType bool
 	instance       interface{}
+	isNonNode      bool
 }
 
 type IDResolver func(id string) interface{}
@@ -70,6 +73,11 @@ func NewTypeInfo(instance interface{}) *TypeInfo {
 		instance: instance,
 	}
 	return &typeDef
+}
+
+func (typ *TypeInfo) SetNonNode() *TypeInfo {
+	typ.isNonNode = true
+	return typ
 }
 
 func (typ *TypeInfo) SetIDResolver(f IDResolver) *TypeInfo {
@@ -143,6 +151,20 @@ func (typ *TypeInfo) ResolvedField(name string, methodName string, args []ArgInf
 	return typ
 }
 
+func (typ *TypeInfo) ExtensionField(name string, extensionFunc interface{}, args []ArgInfo) *TypeInfo {
+	autoArgs := IsAutoArgs(args)
+	if autoArgs {
+		args = nil
+	}
+	typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
+		Name:       name,
+		ExtensionFunc: extensionFunc,
+		Args:       args,
+		AutoArgs:   autoArgs,
+	})
+	return typ
+}
+
 // Auto adds resolved fields
 func (typ *TypeInfo) ResolvedFields() *TypeInfo {
 	ptrType := reflect.PtrTo(typ.Type)
@@ -175,10 +197,11 @@ func (typ *TypeInfo) AddField(name string, field *graphql.Field) *TypeInfo {
 }
 
 type ResolvedFieldInfo struct {
-	Name       string
-	MethodName string
-	Args       []ArgInfo
-	AutoArgs   bool
+	Name          string
+	MethodName    string
+	Args          []ArgInfo
+	AutoArgs      bool
+	ExtensionFunc interface{}
 }
 
 func (typ *TypeInfo) SetMutation() *TypeInfo {
@@ -251,6 +274,13 @@ func IsAutoOutputs(outputs []OutputInfo) bool {
 
 func ToQLType(typ reflect.Type) graphql.Output {
 	switch typ.Kind() {
+	case reflect.Slice: // []string
+		elemType := typ.Elem()
+		if elemQLType := ToQLType(elemType); elemQLType != nil {
+			return graphql.NewList(elemQLType)
+		} else {
+			return nil
+		}
 	case reflect.Float32:
 		fallthrough
 	case reflect.Float64:
@@ -327,6 +357,10 @@ func ParseString(str string, typ reflect.Type) interface{} {
 }
 
 func Warning(a ...interface{}) {
-	a = append([]interface{}{"[Gographer warning]"}, a...)
+	_, file, line, _ := runtime.Caller(1)
+	idx := strings.LastIndex(file, "/")
+	prefix := fmt.Sprint("[Gographer warning @", file[idx + 1:], ":", line, "]")
+	a = append([]interface{}{prefix}, a...)
 	fmt.Println(a...)
+	fmt.Printf("%s", debug.Stack())
 }

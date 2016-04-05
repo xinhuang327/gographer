@@ -19,33 +19,44 @@ func (sch *SchemaInfo) processObjectType(
 	qlTypeConf := graphql.ObjectConfig{}
 	qlTypeConf.Name = typ.Name
 
-	fields := make(graphql.Fields)
+	var fieldsGetter = graphql.FieldsThunk(func() graphql.Fields {
 
-	// simple fields
-	for fieldName, field := range typ.fields {
-		fields[fieldName] = field
-	}
+		fields := make(graphql.Fields)
 
-	// node field for root
-	if typ.isRootType {
-		fields["node"] = nodeDefinitions.NodeField
-	}
-
-	// resolved fields
-	for _, rf := range typ.resolvedFields {
-
-		refType := typ.Type
-		refPtrType := reflect.PtrTo(refType)
-
-		// try find method for pointer type first
-		var method reflect.Method
-		foundMethod := false
-		if method, foundMethod = refPtrType.MethodByName(rf.MethodName); !foundMethod {
-			method, foundMethod = refType.MethodByName(rf.MethodName)
+		// simple fields
+		for fieldName, field := range typ.fields {
+			fields[fieldName] = field
 		}
 
-		if foundMethod {
-			funcType := method.Func.Type()
+		// node field for root
+		if typ.isRootType {
+			fields["node"] = nodeDefinitions.NodeField
+		}
+
+		// resolved fields
+		for _, rf := range typ.resolvedFields {
+
+			refType := typ.Type
+			refPtrType := reflect.PtrTo(refType)
+
+			var funcType reflect.Type
+
+			if rf.ExtensionFunc != nil {
+				funcType = reflect.TypeOf(rf.ExtensionFunc)
+			} else {
+				var method reflect.Method
+				foundMethod := false
+				if method, foundMethod = refPtrType.MethodByName(rf.MethodName); !foundMethod {
+					method, foundMethod = refType.MethodByName(rf.MethodName)
+				}
+				if foundMethod {
+					funcType = method.Func.Type()
+				} else {
+					Warning("Cannot find method", rf.MethodName, "for type", refType.Name())
+					continue
+				}
+			}
+
 			returnType := funcType.Out(0) // only use first return value, TODO: handle error
 			var fieldArgs graphql.FieldConfigArgument
 
@@ -86,7 +97,7 @@ func (sch *SchemaInfo) processObjectType(
 				// use manual argument info
 				for i := 1; i < funcType.NumIn(); i++ {
 					argQLType := ToQLType(funcType.In(i))
-					arg := rf.Args[i-1]
+					arg := rf.Args[i - 1]
 					if arg.NonNull {
 						argQLType = graphql.NewNonNull(argQLType)
 					}
@@ -111,13 +122,14 @@ func (sch *SchemaInfo) processObjectType(
 					return sch.dynamicCallResolver(rfCaptured, funcType, typCaptured, fieldArgs, resultIsConnection, p)
 				},
 			}
-		} else {
-			Warning("Cannot find method", rf.MethodName, "for type", refType.Name())
-		}
-	} // end of resolved fields
+		} // end of resolved fields
 
-	qlTypeConf.Fields = fields
-	if !typ.isRootType {
+		return fields
+	})
+
+	qlTypeConf.Fields = fieldsGetter
+
+	if !typ.isRootType && !typ.isNonNode {
 		qlTypeConf.Interfaces = []*graphql.Interface{nodeDefinitions.NodeInterface}
 	}
 	qlType := graphql.NewObject(qlTypeConf)
@@ -136,7 +148,7 @@ func (sch *SchemaInfo) dynamicCallResolver(
 
 	defer func() {
 		if e := recover(); e != nil {
-			fmt.Printf("%s: %s", e, debug.Stack()) // line 20
+			fmt.Printf("%s: %s", e, debug.Stack())
 		}
 	}()
 
@@ -153,15 +165,28 @@ func (sch *SchemaInfo) dynamicCallResolver(
 		return nil, errors.New("Cannot get source object when calling " + rf.MethodName)
 	}
 
-	methodVal := objVal.MethodByName(rf.MethodName)
-	if !methodVal.IsValid() {
-		return nil, errors.New(fmt.Sprint("Cannot get method ", rf.MethodName, " for object ", objVal.Type()))
+	var isExtensionCall = rf.ExtensionFunc != nil
+	var funcVal reflect.Value
+
+	if !isExtensionCall {
+		funcVal = objVal.MethodByName(rf.MethodName)
+	} else {
+		funcVal = reflect.ValueOf(rf.ExtensionFunc)
+	}
+
+	if !funcVal.IsValid() {
+		return nil, errors.New(fmt.Sprint("Cannot get method ", rf.MethodName, " for object ", objVal.Type(), "funcVal", funcVal))
 	}
 
 	var inValues []reflect.Value
+
+	if isExtensionCall {
+		inValues = append(inValues, objVal) // first argument needs to be the source object
+	}
+
 	if rf.AutoArgs {
 		// use struct args
-		if funcType.NumIn() == 2{
+		if funcType.NumIn() == 2 {
 			argStructType := funcType.In(1)
 			argStructVal := reflect.New(argStructType).Elem()
 
@@ -194,7 +219,7 @@ func (sch *SchemaInfo) dynamicCallResolver(
 		}
 	}
 
-	outValues := methodVal.Call(inValues)
+	outValues := funcVal.Call(inValues)
 
 	out := outValues[0].Interface()
 

@@ -9,10 +9,21 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"reflect"
 )
 
 func main() {
+	inspectFunc(func(a int, b string) string {
+		return "hello"
+	})
+}
 
+func inspectFunc(fun interface{}) {
+	typ := reflect.TypeOf(fun)
+	fmt.Println(typ)
+}
+
+func updateSchema(){
 	schemaInfo := data.GetModelSchemaInfo()
 	schema, err := schemaInfo.GetSchema()
 	if err != nil {
@@ -36,5 +47,4 @@ func main() {
 			}
 		}
 	}
-
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+	"fmt"
 )
 
 func getComplexQLType(
@@ -33,7 +34,7 @@ func getComplexQLType(
 
 	var elemQLType graphql.Output
 
-	elemTypeName := elemType.Name()
+	var elemTypeName = elemType.Name()
 	isPrimitive := true
 	if elemQLType = ToQLType(elemType); elemQLType == nil {
 		isPrimitive = false
@@ -44,6 +45,19 @@ func getComplexQLType(
 
 	inferredElemTypeName := inferTypeNameFromField(fieldName)
 
+	//
+	//if elemType == reflect.TypeOf(relay.EdgeType{}) {
+	//	if inferredElemTypeName != "" {
+	//		elemQLType := qlTypes[inferredElemTypeName]
+	//		conn := getOrCreateConnection(inferredElemTypeName, elemQLType, qlConns)
+	//		returnQLType = conn.EdgeType
+	//		qlTypeKind = QLTypeKind_Edge
+	//	} else {
+	//		Warning("Cannot infer type name for connection", fieldName, elemType)
+	//	}
+	//}
+
+	// TODO: Better handling Connection and Edge types...
 	if elemQLType != nil {
 		if !isList {
 			returnQLType = elemQLType
@@ -53,19 +67,21 @@ func getComplexQLType(
 				qlTypeKind = QLTypeKind_Struct
 			}
 		} else {
-			if isPrimitive {
-				// primitive list
-				returnQLType = graphql.NewList(elemQLType)
-				qlTypeKind = QLTypeKind_SimpleList
-			} else {
-				// is connection
+			isConnection := false
+			if isConnection {
+				// connection
 				conn := getOrCreateConnection(elemTypeName, elemQLType, qlConns)
 				returnQLType = conn.ConnectionType
 				qlTypeKind = QLTypeKind_Connection
+			} else {
+				// list
+				returnQLType = graphql.NewList(elemQLType)
+				qlTypeKind = QLTypeKind_SimpleList
 			}
 		}
 	} else if elemType == reflect.TypeOf(relay.EdgeType{}) {
 		if inferredElemTypeName != "" {
+			elemQLType := qlTypes[inferredElemTypeName]
 			conn := getOrCreateConnection(inferredElemTypeName, elemQLType, qlConns)
 			returnQLType = conn.EdgeType
 			qlTypeKind = QLTypeKind_Edge
@@ -73,7 +89,8 @@ func getComplexQLType(
 			Warning("Cannot infer type name for connection", fieldName, elemType)
 		}
 	} else {
-		Warning("Cannot resolve QL type for return type", returnType)
+		Warning("Cannot resolve QL type for return type", returnType, "elemType", elemType)
+		fmt.Println(qlTypes)
 	}
 
 	return returnQLType, qlTypeKind
