@@ -59,8 +59,15 @@ func (sch *SchemaInfo) processObjectType(
 
 			returnType := funcType.Out(0) // only use first return value, TODO: handle error
 			var fieldArgs graphql.FieldConfigArgument
+			var returnQLType graphql.Output
+			var qlTypeKind QLTypeKind = QLTypeKind_Simple
 
-			returnQLType, qlTypeKind := getComplexQLType(returnType, rf.Name, qlTypes, qlConns)
+			if rf.ManualType == nil {
+				returnQLType, qlTypeKind = getComplexQLType(returnType, rf.Name, qlTypes, qlConns)
+			} else {
+				// extension with manual return type, probably a embedded struct's field
+				returnQLType = rf.ManualType
+			}
 
 			resultIsConnection := qlTypeKind == QLTypeKind_Connection
 
@@ -108,7 +115,11 @@ func (sch *SchemaInfo) processObjectType(
 				}
 			}
 
-			fieldArgs = relay.NewConnectionArgs(funcArgs)
+			if qlTypeKind == QLTypeKind_Connection {
+				fieldArgs = relay.NewConnectionArgs(funcArgs)
+			} else {
+				fieldArgs = funcArgs
+			}
 
 			// capture infomation for later function call
 			typCaptured := typ

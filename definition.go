@@ -1,14 +1,12 @@
 package gographer
 
 import (
+	"encoding"
 	"fmt"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/relay"
 	"reflect"
-	"strconv"
 	"strings"
-	"runtime"
-	"runtime/debug"
 )
 
 const (
@@ -57,6 +55,7 @@ type TypeInfo struct {
 	isMutationType bool
 	instance       interface{}
 	isNonNode      bool
+	embeddedTypes  map[string]reflect.Type
 }
 
 type IDResolver func(id string) interface{}
@@ -67,10 +66,11 @@ func NewTypeInfo(instance interface{}) *TypeInfo {
 		type_ = type_.Elem()
 	}
 	typeDef := TypeInfo{
-		Type:     type_,
-		Name:     type_.Name(),
-		fields:   make(graphql.Fields),
-		instance: instance,
+		Type:          type_,
+		Name:          type_.Name(),
+		fields:        make(graphql.Fields),
+		instance:      instance,
+		embeddedTypes: make(map[string]reflect.Type),
 	}
 	return &typeDef
 }
@@ -82,6 +82,14 @@ func (typ *TypeInfo) SetNonNode() *TypeInfo {
 
 func (typ *TypeInfo) SetIDResolver(f IDResolver) *TypeInfo {
 	typ.idResolver = f
+	return typ
+}
+
+func (typ *TypeInfo) SetEmbeddedTypes(ifaces ...interface{}) *TypeInfo {
+	for _, iface := range ifaces {
+		t := reflect.TypeOf(iface)
+		typ.embeddedTypes[t.Name()] = t
+	}
 	return typ
 }
 
@@ -116,25 +124,106 @@ func (typ *TypeInfo) IDField(name string, idFetcher relay.GlobalIDFetcherFn) *Ty
 	return typ
 }
 
-// Auto adds simple fields
+var TextMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+
+// Auto adds simple fields, including embedded struct's fields (implemented with resolved field)
 func (typ *TypeInfo) SimpleFields() *TypeInfo {
-	for i := 0; i < typ.Type.NumField(); i++ {
-		field := typ.Type.Field(i)
+
+	typ.processSimpleFields([]string{}, typ.Type)
+
+	return typ
+}
+
+// Recursively process all the fields, including embedded struct fields.
+func (typ *TypeInfo) processSimpleFields(nestFieldsInput []string, nestTypeInput reflect.Type) {
+	//fmt.Println("processSimpleFields", nestTypeInput, nestFieldsInput)
+	var nestFields []string
+	for _, nf := range nestFieldsInput {
+		nestFields = append(nestFields, nf)
+	}
+	var nestType = nestTypeInput
+
+	for i := 0; i < nestType.NumField(); i++ {
+		field := nestType.Field(i)
+		fmt.Println(nestType.Name(), i, field.Name, field.Type)
+		var fullFieldName = field.Name
 		var fieldName string
 		if jsonTag := field.Tag.Get("json"); jsonTag != "" {
 			fieldName = jsonTag
 		} else {
 			fieldName = field.Name
 		}
-		if _, exists := typ.fields[fieldName]; !exists {
-			if qlType := ToQLType(field.Type); qlType != nil {
+
+		hasQLType := false
+		var qlType graphql.Output
+		if qlType = ToQLType(field.Type); qlType != nil {
+			if len(nestFields) == 0 {
 				typ.AddField(fieldName, &graphql.Field{
 					Type: qlType,
 				})
+			} else {
+				typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
+					Name:       fieldName,
+					Args:       nil,
+					AutoArgs:   true,
+					ManualType: qlType,
+					ExtensionFunc: func(s interface{}) interface{} {
+						val := reflect.ValueOf(s)
+						// iterate field value chain
+						for _, nf := range nestFields {
+							val = val.FieldByName(nf)
+						}
+						fieldValue := val.FieldByName(fullFieldName)
+						if fieldValue.IsValid() {
+							return fieldValue.Interface()
+						}
+						return nil
+					},
+				})
+			}
+			hasQLType = true
+		}
+
+		if !hasQLType {
+			// deal with struct field...
+			if field.Type.Kind() == reflect.Struct {
+				fmt.Println("Struct Field: ", typ.Name, field.Name, field.Type.Name())
+
+				if field.Type.Implements(TextMarshalerType) {
+					// time.Time
+					//fmt.Println("is TextMarshalerType")
+					fullFieldName := field.Name
+					typ.ExtensionField(fieldName, func(s interface{}) string {
+						val := reflect.ValueOf(s)
+						// iterate field value chain
+						for _, nf := range nestFields {
+							val = val.FieldByName(nf)
+						}
+						fieldValue := val.FieldByName(fullFieldName)
+						if fieldValue.IsValid() {
+							if textMarshaler, ok := fieldValue.Interface().(encoding.TextMarshaler); ok {
+								text, _ := textMarshaler.MarshalText()
+								return string(text)
+							}
+						}
+						return ""
+					}, AutoArgs)
+
+				} else {
+					// handle embedded struct
+					if field.Name == field.Type.Name() && field.Type == typ.embeddedTypes[field.Name] {
+						var nextNestFields []string
+						for _, nf := range nestFields {
+							nextNestFields = append(nextNestFields, nf)
+						}
+						nextNestFields = append(nextNestFields, field.Name)
+						//nestType = field.Type will set previous call's nestType, don't do it.
+						typ.processSimpleFields(nextNestFields, field.Type)
+					}
+				}
 			}
 		}
 	}
-	return typ
 }
 
 func (typ *TypeInfo) ResolvedField(name string, methodName string, args []ArgInfo) *TypeInfo {
@@ -157,10 +246,10 @@ func (typ *TypeInfo) ExtensionField(name string, extensionFunc interface{}, args
 		args = nil
 	}
 	typ.resolvedFields = append(typ.resolvedFields, ResolvedFieldInfo{
-		Name:       name,
+		Name:          name,
 		ExtensionFunc: extensionFunc,
-		Args:       args,
-		AutoArgs:   autoArgs,
+		Args:          args,
+		AutoArgs:      autoArgs,
 	})
 	return typ
 }
@@ -202,6 +291,7 @@ type ResolvedFieldInfo struct {
 	Args          []ArgInfo
 	AutoArgs      bool
 	ExtensionFunc interface{}
+	ManualType    graphql.Output
 }
 
 func (typ *TypeInfo) SetMutation() *TypeInfo {
@@ -270,97 +360,4 @@ var AutoOutputs = []OutputInfo{OutputInfo{Name: "__AutoOutputs__"}}
 
 func IsAutoOutputs(outputs []OutputInfo) bool {
 	return len(outputs) == 1 && outputs[0] == AutoOutputs[0]
-}
-
-func ToQLType(typ reflect.Type) graphql.Output {
-	switch typ.Kind() {
-	case reflect.Slice: // []string
-		elemType := typ.Elem()
-		if elemQLType := ToQLType(elemType); elemQLType != nil {
-			return graphql.NewList(elemQLType)
-		} else {
-			return nil
-		}
-	case reflect.Float32:
-		fallthrough
-	case reflect.Float64:
-		return graphql.Float
-	case reflect.String:
-		return graphql.String
-	case reflect.Bool:
-		return graphql.Boolean
-	case reflect.Int:
-		fallthrough
-	case reflect.Int8:
-		fallthrough
-	case reflect.Int16:
-		fallthrough
-	case reflect.Int32:
-		fallthrough
-	case reflect.Int64:
-		fallthrough
-	case reflect.Uint:
-		fallthrough
-	case reflect.Uint8:
-		fallthrough
-	case reflect.Uint16:
-		fallthrough
-	case reflect.Uint32:
-		fallthrough
-	case reflect.Uint64:
-		return graphql.Int
-	default:
-		return nil
-	}
-}
-
-func ParseString(str string, typ reflect.Type) interface{} {
-	switch typ.Kind() {
-	case reflect.Float32:
-		fallthrough
-	case reflect.Float64:
-		if v, err := strconv.ParseFloat(str, 32); err == nil {
-			return v
-		}
-	case reflect.String:
-		return str
-	case reflect.Bool:
-		if v, err := strconv.ParseBool(str); err == nil {
-			return v
-		}
-	case reflect.Int:
-		fallthrough
-	case reflect.Int8:
-		fallthrough
-	case reflect.Int16:
-		fallthrough
-	case reflect.Int32:
-		fallthrough
-	case reflect.Int64:
-		fallthrough
-	case reflect.Uint:
-		fallthrough
-	case reflect.Uint8:
-		fallthrough
-	case reflect.Uint16:
-		fallthrough
-	case reflect.Uint32:
-		fallthrough
-	case reflect.Uint64:
-		if v, err := strconv.ParseInt(str, 0, 0); err == nil {
-			return v
-		}
-	default:
-		return nil
-	}
-	return nil
-}
-
-func Warning(a ...interface{}) {
-	_, file, line, _ := runtime.Caller(1)
-	idx := strings.LastIndex(file, "/")
-	prefix := fmt.Sprint("[Gographer warning @", file[idx + 1:], ":", line, "]")
-	a = append([]interface{}{prefix}, a...)
-	fmt.Println(a...)
-	fmt.Printf("%s", debug.Stack())
 }

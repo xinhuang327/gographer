@@ -8,6 +8,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 	"fmt"
+	"strconv"
+	"runtime"
+	"runtime/debug"
 )
 
 func getComplexQLType(
@@ -152,4 +155,97 @@ func inferTypeNameFromField(fieldName string) string {
 		return strings.TrimSuffix(fieldName, "Connection")
 	}
 	return ""
+}
+
+func ToQLType(typ reflect.Type) graphql.Output {
+	switch typ.Kind() {
+	case reflect.Slice: // []string
+		elemType := typ.Elem()
+		if elemQLType := ToQLType(elemType); elemQLType != nil {
+			return graphql.NewList(elemQLType)
+		} else {
+			return nil
+		}
+	case reflect.Float32:
+		fallthrough
+	case reflect.Float64:
+		return graphql.Float
+	case reflect.String:
+		return graphql.String
+	case reflect.Bool:
+		return graphql.Boolean
+	case reflect.Int:
+		fallthrough
+	case reflect.Int8:
+		fallthrough
+	case reflect.Int16:
+		fallthrough
+	case reflect.Int32:
+		fallthrough
+	case reflect.Int64:
+		fallthrough
+	case reflect.Uint:
+		fallthrough
+	case reflect.Uint8:
+		fallthrough
+	case reflect.Uint16:
+		fallthrough
+	case reflect.Uint32:
+		fallthrough
+	case reflect.Uint64:
+		return graphql.Int
+	default:
+		return nil
+	}
+}
+
+func ParseString(str string, typ reflect.Type) interface{} {
+	switch typ.Kind() {
+	case reflect.Float32:
+		fallthrough
+	case reflect.Float64:
+		if v, err := strconv.ParseFloat(str, 32); err == nil {
+			return v
+		}
+	case reflect.String:
+		return str
+	case reflect.Bool:
+		if v, err := strconv.ParseBool(str); err == nil {
+			return v
+		}
+	case reflect.Int:
+		fallthrough
+	case reflect.Int8:
+		fallthrough
+	case reflect.Int16:
+		fallthrough
+	case reflect.Int32:
+		fallthrough
+	case reflect.Int64:
+		fallthrough
+	case reflect.Uint:
+		fallthrough
+	case reflect.Uint8:
+		fallthrough
+	case reflect.Uint16:
+		fallthrough
+	case reflect.Uint32:
+		fallthrough
+	case reflect.Uint64:
+		if v, err := strconv.ParseInt(str, 0, 0); err == nil {
+			return v
+		}
+	default:
+		return nil
+	}
+	return nil
+}
+
+func Warning(a ...interface{}) {
+	_, file, line, _ := runtime.Caller(1)
+	idx := strings.LastIndex(file, "/")
+	prefix := fmt.Sprint("[Gographer warning @", file[idx + 1:], ":", line, "]")
+	a = append([]interface{}{prefix}, a...)
+	fmt.Println(a...)
+	fmt.Printf("%s", debug.Stack())
 }
